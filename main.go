@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"os"
 	"sync"
@@ -14,15 +15,19 @@ import (
 	"go.uber.org/multierr"
 )
 
+var flagDryRun = flag.Bool("dryrun", true, "Set to false to run the deletion.")
+
 func main() {
-	err := run(context.Background())
+	flag.Parse()
+
+	err := run(context.Background(), *flagDryRun)
 	if err != nil {
 		fmt.Println(err)
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context) (err error) {
+func run(ctx context.Context, dryRun bool) (err error) {
 	cfg, err := config.LoadDefaultConfig(ctx)
 	if err != nil {
 		err = fmt.Errorf("unable to load SDK config: %w", err)
@@ -48,17 +53,21 @@ func run(ctx context.Context) (err error) {
 		return
 	}
 
-	fmt.Printf("All images:\n")
-	for _, img := range allImages {
-		fmt.Printf("  %v\n", img)
-	}
-
-	fmt.Println()
-
+	inUseImagesMap := map[string]struct{}{}
 	fmt.Printf("Images in use:\n")
 	for _, img := range inUseImages {
 		fmt.Printf("  %v\n", img)
+		inUseImagesMap[img] = struct{}{}
 	}
+
+	fmt.Printf("Images that aren't used in ECS:\n")
+	for _, img := range allImages {
+		if _, ok := inUseImagesMap[img]; !ok {
+			fmt.Printf("  %v\n", img)
+		}
+	}
+
+	fmt.Println()
 
 	return err
 }
