@@ -11,6 +11,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/ecr"
+	"github.com/aws/aws-sdk-go-v2/service/ecr/types"
 	"github.com/aws/aws-sdk-go-v2/service/ecs"
 	"go.uber.org/multierr"
 )
@@ -36,7 +37,7 @@ func run(ctx context.Context, dryRun bool) (err error) {
 
 	var wg sync.WaitGroup
 	wg.Add(2)
-	var allImages []string
+	var allImages []image
 	var inUseImages []string
 	var allImagesErr, inUseImagesErr error
 	go func() {
@@ -60,11 +61,41 @@ func run(ctx context.Context, dryRun bool) (err error) {
 		inUseImagesMap[img] = struct{}{}
 	}
 
+	repoNames := map[string]struct{}{}
+	unusedImagesByRepoName := map[string][]image{}
+	var unusedImageCount int
 	fmt.Printf("Images that aren't used in ECS:\n")
 	for _, img := range allImages {
-		if _, ok := inUseImagesMap[img]; !ok {
-			fmt.Printf("  %v\n", img)
+		if _, ok := inUseImagesMap[img.URI]; !ok {
+			repoNames[img.Repo.Name] = struct{}{}
+			unusedImagesByRepoName[img.Repo.Name] = append(unusedImagesByRepoName[img.Repo.Name], img)
+			unusedImageCount++
+			fmt.Printf("  %v\n", img.URI)
 		}
+	}
+
+	if !dryRun {
+		fmt.Printf("Deleting %d unused images...\n", unusedImageCount)
+		for repoName := range repoNames {
+			unusedImages := unusedImagesByRepoName[repoName]
+			if len(unusedImages) == 0 {
+				continue
+			}
+			fmt.Printf("  %s - deleting %d tags...\n", repoName, len(unusedImages))
+			tags := make([]string, len(unusedImages))
+			for i := 0; i < len(unusedImages); i++ {
+				tags[i] = unusedImages[i].Tag
+			}
+			// Run 100 tags at a time.
+			for tagPage := range pager.New(tags, 100) {
+				fmt.Printf("    deleting batch of %d tags...\n", len(tagPage))
+				err = deleteImages(ctx, cfg, repoName, tagPage)
+				if err != nil {
+					err = fmt.Errorf("failed to delete image tags: %w", err)
+				}
+			}
+		}
+		fmt.Printf("Deleted %d unused images.\n", unusedImageCount)
 	}
 
 	fmt.Println()
@@ -72,7 +103,27 @@ func run(ctx context.Context, dryRun bool) (err error) {
 	return err
 }
 
-func getAllImages(ctx context.Context, cfg aws.Config) (uris []string, err error) {
+func deleteImages(ctx context.Context, cfg aws.Config, repoName string, tags []string) (err error) {
+	imageIDs := make([]types.ImageIdentifier, len(tags))
+	for i := 0; i < len(tags); i++ {
+		imageIDs[i] = types.ImageIdentifier{ImageTag: &tags[i]}
+	}
+
+	ecrService := ecr.NewFromConfig(cfg)
+	_, err = ecrService.BatchDeleteImage(ctx, &ecr.BatchDeleteImageInput{
+		RepositoryName: &repoName,
+		ImageIds:       imageIDs,
+	})
+	return err
+}
+
+type image struct {
+	Repo repo
+	URI  string
+	Tag  string
+}
+
+func getAllImages(ctx context.Context, cfg aws.Config) (images []image, err error) {
 	ecrService := ecr.NewFromConfig(cfg)
 
 	var repositories []repo
@@ -90,7 +141,11 @@ func getAllImages(ctx context.Context, cfg aws.Config) (uris []string, err error
 			return
 		}
 		for _, tag := range tags {
-			uris = append(uris, fmt.Sprintf("%s:%s", repo.URI, tag))
+			images = append(images, image{
+				Repo: repo,
+				URI:  fmt.Sprintf("%s:%s", repo.URI, tag),
+				Tag:  tag,
+			})
 		}
 	}
 
