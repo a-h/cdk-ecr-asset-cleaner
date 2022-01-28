@@ -38,7 +38,7 @@ func run(ctx context.Context, dryRun bool) (err error) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 	var allImages []image
-	var inUseImages []string
+	var inUseImages []inUseImage
 	var allImagesErr, inUseImagesErr error
 	go func() {
 		defer wg.Done()
@@ -54,11 +54,11 @@ func run(ctx context.Context, dryRun bool) (err error) {
 		return
 	}
 
-	inUseImagesMap := map[string]struct{}{}
+	inUseImagesByContainerMap := map[string]struct{}{}
 	fmt.Printf("Images in use:\n")
 	for _, img := range inUseImages {
-		fmt.Printf("  %v\n", img)
-		inUseImagesMap[img] = struct{}{}
+		fmt.Printf("  %v %v\n", img.ServiceName, img.Container)
+		inUseImagesByContainerMap[img.Container] = struct{}{}
 	}
 
 	repoNames := map[string]struct{}{}
@@ -66,7 +66,7 @@ func run(ctx context.Context, dryRun bool) (err error) {
 	var unusedImageCount int
 	fmt.Printf("Images that aren't used in ECS:\n")
 	for _, img := range allImages {
-		if _, ok := inUseImagesMap[img.URI]; !ok {
+		if _, ok := inUseImagesByContainerMap[img.URI]; !ok {
 			repoNames[img.Repo.Name] = struct{}{}
 			unusedImagesByRepoName[img.Repo.Name] = append(unusedImagesByRepoName[img.Repo.Name], img)
 			unusedImageCount++
@@ -193,7 +193,13 @@ func getRepositoryImages(ctx context.Context, svc *ecr.Client, repositoryName st
 	return
 }
 
-func getInUseImages(ctx context.Context, cfg aws.Config) (images []string, err error) {
+type inUseImage struct {
+	Cluster     string
+	ServiceName string
+	Container   string
+}
+
+func getInUseImages(ctx context.Context, cfg aws.Config) (images []inUseImage, err error) {
 	ecsService := ecs.NewFromConfig(cfg)
 
 	clusters, err := getClusters(ctx, ecsService)
@@ -228,12 +234,18 @@ func getInUseImages(ctx context.Context, cfg aws.Config) (images []string, err e
 			}
 
 			for taskARNsBatch := range pager.New(taskARNs, 10) {
-				var containerARNsBatch []string
-				containerARNsBatch, err = getClusterTaskContainerARNs(ctx, ecsService, cluster, taskARNsBatch)
+				var containerIDsBatch []string
+				containerIDsBatch, err = getClusterTaskContainer(ctx, ecsService, cluster, taskARNsBatch)
 				if err != nil {
 					return
 				}
-				images = append(images, containerARNsBatch...)
+				for _, cnt := range containerIDsBatch {
+					images = append(images, inUseImage{
+						Cluster:     cluster,
+						ServiceName: service,
+						Container:   cnt,
+					})
+				}
 			}
 		}
 	}
@@ -302,7 +314,7 @@ func getClusterServiceTaskARNs(ctx context.Context, svc *ecs.Client, cluster, se
 	return
 }
 
-func getClusterTaskContainerARNs(ctx context.Context, svc *ecs.Client, cluster string, taskARNs []string) (result []string, err error) {
+func getClusterTaskContainer(ctx context.Context, svc *ecs.Client, cluster string, taskARNs []string) (result []string, err error) {
 	dto, err := svc.DescribeTasks(ctx, &ecs.DescribeTasksInput{
 		Tasks:   taskARNs,
 		Cluster: &cluster,
