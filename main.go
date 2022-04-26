@@ -13,6 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ecr"
 	"github.com/aws/aws-sdk-go-v2/service/ecr/types"
 	"github.com/aws/aws-sdk-go-v2/service/ecs"
+	"github.com/aws/aws-sdk-go-v2/service/lambda"
 	"go.uber.org/multierr"
 )
 
@@ -36,28 +37,38 @@ func run(ctx context.Context, dryRun bool) (err error) {
 	}
 
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(3)
 	var allImages []image
-	var inUseImages []inUseImage
-	var allImagesErr, inUseImagesErr error
+	var inUseImagesECS []inUseImageECS
+	var inUseImagesLambda []inUseImageLambda
+	var allImagesErr, inUseImagesECSErr, inUseImagesLambdaErr error
 	go func() {
 		defer wg.Done()
 		allImages, allImagesErr = getAllImages(ctx, cfg)
 	}()
 	go func() {
 		defer wg.Done()
-		inUseImages, inUseImagesErr = getInUseImages(ctx, cfg)
+		inUseImagesECS, inUseImagesECSErr = getInUseImages(ctx, cfg)
+	}()
+	go func() {
+		defer wg.Done()
+		inUseImagesLambda, inUseImagesLambdaErr = getInUseImagesLambda(ctx, cfg)
 	}()
 	wg.Wait()
-	err = multierr.Combine(allImagesErr, inUseImagesErr)
+	err = multierr.Combine(allImagesErr, inUseImagesECSErr, inUseImagesLambdaErr)
 	if err != nil {
 		return
 	}
 
 	inUseImagesByContainerMap := map[string]struct{}{}
-	fmt.Printf("Images in use:\n")
-	for _, img := range inUseImages {
+	fmt.Printf("Images in use (ECS):\n")
+	for _, img := range inUseImagesECS {
 		fmt.Printf("  %v %v\n", img.ServiceName, img.Container)
+		inUseImagesByContainerMap[img.Container] = struct{}{}
+	}
+	fmt.Printf("Images in use (Lambda):\n")
+	for _, img := range inUseImagesLambda {
+		fmt.Printf("  %v %v\n", img.FunctionName, img.Container)
 		inUseImagesByContainerMap[img.Container] = struct{}{}
 	}
 
@@ -193,13 +204,13 @@ func getRepositoryImages(ctx context.Context, svc *ecr.Client, repositoryName st
 	return
 }
 
-type inUseImage struct {
+type inUseImageECS struct {
 	Cluster     string
 	ServiceName string
 	Container   string
 }
 
-func getInUseImages(ctx context.Context, cfg aws.Config) (images []inUseImage, err error) {
+func getInUseImages(ctx context.Context, cfg aws.Config) (images []inUseImageECS, err error) {
 	ecsService := ecs.NewFromConfig(cfg)
 
 	clusters, err := getClusters(ctx, ecsService)
@@ -240,7 +251,7 @@ func getInUseImages(ctx context.Context, cfg aws.Config) (images []inUseImage, e
 					return
 				}
 				for _, cnt := range containerIDsBatch {
-					images = append(images, inUseImage{
+					images = append(images, inUseImageECS{
 						Cluster:     cluster,
 						ServiceName: service,
 						Container:   cnt,
@@ -250,6 +261,43 @@ func getInUseImages(ctx context.Context, cfg aws.Config) (images []inUseImage, e
 		}
 	}
 
+	return
+}
+
+type inUseImageLambda struct {
+	FunctionName string
+	Container    string
+}
+
+func getInUseImagesLambda(ctx context.Context, cfg aws.Config) (inUseImages []inUseImageLambda, err error) {
+	lambdaService := lambda.NewFromConfig(cfg)
+
+	p := lambda.NewListFunctionsPaginator(lambdaService, &lambda.ListFunctionsInput{})
+	if p.HasMorePages() {
+		var op *lambda.ListFunctionsOutput
+		op, err = p.NextPage(ctx)
+		if err != nil {
+			err = fmt.Errorf("failed to list functions: %w", err)
+			return
+		}
+		for _, f := range op.Functions {
+			if string(f.PackageType) != "Image" {
+				continue
+			}
+			var gfo *lambda.GetFunctionOutput
+			gfo, err = lambdaService.GetFunction(ctx, &lambda.GetFunctionInput{
+				FunctionName: f.FunctionName,
+			})
+			if err != nil {
+				err = fmt.Errorf("failed to get function %q: %w", *f.FunctionName, err)
+				return
+			}
+			inUseImages = append(inUseImages, inUseImageLambda{
+				FunctionName: *f.FunctionName,
+				Container:    *gfo.Code.ImageUri,
+			})
+		}
+	}
 	return
 }
 
