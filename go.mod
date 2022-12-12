@@ -1,15 +1,17 @@
 module github.com/a-h/cdk-ecr-asset-cleaner
 
-go 1.17
+go 1.18
 
 require (
-	github.com/a-h/pager v0.0.0-20220127131508-d3d7e81b82cb
+	github.com/a-h/pager v0.0.0-20221212110526-86e46342f853
 	github.com/aws/aws-sdk-go-v2 v1.16.3
 	github.com/aws/aws-sdk-go-v2/config v1.15.4
 	github.com/aws/aws-sdk-go-v2/service/ecr v1.17.4
 	github.com/aws/aws-sdk-go-v2/service/ecs v1.18.6
 	github.com/aws/aws-sdk-go-v2/service/lambda v1.22.1
 	go.uber.org/multierr v1.8.0
+	go.uber.org/zap v1.24.0
+	golang.org/x/sync v0.1.0
 )
 
 require (

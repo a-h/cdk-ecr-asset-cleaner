@@ -63,8 +63,8 @@ func run(ctx context.Context, dryRun bool) (err error) {
 	inUseImagesByContainerMap := map[string]struct{}{}
 	fmt.Printf("Images in use (ECS):\n")
 	for _, img := range inUseImagesECS {
-		fmt.Printf("  %v %v\n", img.ServiceName, img.Container)
-		inUseImagesByContainerMap[img.Container] = struct{}{}
+		fmt.Printf("  %v %v\n", img.Image, img.ImageName)
+		inUseImagesByContainerMap[img.Image] = struct{}{}
 	}
 	fmt.Printf("Images in use (Lambda):\n")
 	for _, img := range inUseImagesLambda {
@@ -98,7 +98,7 @@ func run(ctx context.Context, dryRun bool) (err error) {
 				tags[i] = unusedImages[i].Tag
 			}
 			// Run 100 tags at a time.
-			for tagPage := range pager.New(tags, 100) {
+			for tagPage := range pager.Channel(tags, 100) {
 				fmt.Printf("    deleting batch of %d tags...\n", len(tagPage))
 				err = deleteImages(ctx, cfg, repoName, tagPage)
 				if err != nil {
@@ -205,59 +205,31 @@ func getRepositoryImages(ctx context.Context, svc *ecr.Client, repositoryName st
 }
 
 type inUseImageECS struct {
-	Cluster     string
-	ServiceName string
-	Container   string
+	ImageName string
+	Image     string
 }
 
 func getInUseImages(ctx context.Context, cfg aws.Config) (images []inUseImageECS, err error) {
 	ecsService := ecs.NewFromConfig(cfg)
 
-	clusters, err := getClusters(ctx, ecsService)
+	taskDefs, err := ecsService.ListTaskDefinitions(ctx, &ecs.ListTaskDefinitionsInput{})
 	if err != nil {
 		return
 	}
 
-	for _, cluster := range clusters {
-		cluster := cluster
-
-		var services []string
-		services, err = getClusterServices(ctx, ecsService, cluster)
+	taskDefArns := taskDefs.TaskDefinitionArns
+	for _, arn := range taskDefArns {
+		output, err := ecsService.DescribeTaskDefinition(ctx, &ecs.DescribeTaskDefinitionInput{TaskDefinition: &arn})
 		if err != nil {
-			return
+			return nil, err
 		}
+		containerDefs := output.TaskDefinition.ContainerDefinitions
 
-		var serviceNames []string
-		for servicesBatch := range pager.New(services, 10) {
-			var serviceNameBatch []string
-			serviceNameBatch, err = getClusterServiceNames(ctx, ecsService, cluster, servicesBatch)
-			if err != nil {
-				return
-			}
-			serviceNames = append(serviceNames, serviceNameBatch...)
-		}
-
-		for _, service := range serviceNames {
-			var taskARNs []string
-			taskARNs, err = getClusterServiceTaskARNs(ctx, ecsService, cluster, service)
-			if err != nil {
-				return
-			}
-
-			for taskARNsBatch := range pager.New(taskARNs, 10) {
-				var containerIDsBatch []string
-				containerIDsBatch, err = getClusterTaskContainer(ctx, ecsService, cluster, taskARNsBatch)
-				if err != nil {
-					return
-				}
-				for _, cnt := range containerIDsBatch {
-					images = append(images, inUseImageECS{
-						Cluster:     cluster,
-						ServiceName: service,
-						Container:   cnt,
-					})
-				}
-			}
+		for _, containerDef := range containerDefs {
+			images = append(images, inUseImageECS{
+				ImageName: *containerDef.Name,
+				Image:     *containerDef.Image,
+			})
 		}
 	}
 
@@ -296,84 +268,6 @@ func getInUseImagesLambda(ctx context.Context, cfg aws.Config) (inUseImages []in
 				FunctionName: *f.FunctionName,
 				Container:    *gfo.Code.ImageUri,
 			})
-		}
-	}
-	return
-}
-
-func getClusters(ctx context.Context, svc *ecs.Client) (result []string, err error) {
-	p := ecs.NewListClustersPaginator(svc, &ecs.ListClustersInput{})
-	for p.HasMorePages() {
-		var op *ecs.ListClustersOutput
-		op, err = p.NextPage(ctx)
-		if err != nil {
-			err = fmt.Errorf("failed to list clusters: %w", err)
-			return
-		}
-		result = append(result, op.ClusterArns...)
-	}
-	return
-}
-
-func getClusterServices(ctx context.Context, svc *ecs.Client, cluster string) (result []string, err error) {
-	p := ecs.NewListServicesPaginator(svc, &ecs.ListServicesInput{
-		Cluster: &cluster,
-	})
-	for p.HasMorePages() {
-		var op *ecs.ListServicesOutput
-		op, err = p.NextPage(ctx)
-		if err != nil {
-			err = fmt.Errorf("failed to list clusters: %w", err)
-			return
-		}
-		result = append(result, op.ServiceArns...)
-	}
-	return
-}
-
-func getClusterServiceNames(ctx context.Context, svc *ecs.Client, cluster string, services []string) (result []string, err error) {
-	op, err := svc.DescribeServices(ctx, &ecs.DescribeServicesInput{
-		Cluster:  &cluster,
-		Services: services,
-	})
-	if err != nil {
-		return
-	}
-	for _, s := range op.Services {
-		result = append(result, *s.ServiceName)
-	}
-	return
-}
-
-func getClusterServiceTaskARNs(ctx context.Context, svc *ecs.Client, cluster, service string) (result []string, err error) {
-	p := ecs.NewListTasksPaginator(svc, &ecs.ListTasksInput{
-		Cluster:     &cluster,
-		ServiceName: &service,
-	})
-	for p.HasMorePages() {
-		var op *ecs.ListTasksOutput
-		op, err = p.NextPage(ctx)
-		if err != nil {
-			err = fmt.Errorf("failed to list tasks: %w", err)
-			return
-		}
-		result = append(result, op.TaskArns...)
-	}
-	return
-}
-
-func getClusterTaskContainer(ctx context.Context, svc *ecs.Client, cluster string, taskARNs []string) (result []string, err error) {
-	dto, err := svc.DescribeTasks(ctx, &ecs.DescribeTasksInput{
-		Tasks:   taskARNs,
-		Cluster: &cluster,
-	})
-	if err != nil {
-		err = fmt.Errorf("failed to get cluster task descriptions: %w", err)
-		return
-	}
-	for _, t := range dto.Tasks {
-		for _, c := range t.Containers {
-			result = append(result, *c.Image)
 		}
 	}
 	return
