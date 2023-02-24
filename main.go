@@ -213,7 +213,6 @@ func getInUseImages(ctx context.Context, cfg aws.Config) (images []inUseImageECS
 	ecsService := ecs.NewFromConfig(cfg)
 
 	p := ecs.NewListTaskDefinitionsPaginator(ecsService, &ecs.ListTaskDefinitionsInput{})
-
 	for p.HasMorePages() {
 		var op *ecs.ListTaskDefinitionsOutput
 		op, err = p.NextPage(ctx)
@@ -228,9 +227,7 @@ func getInUseImages(ctx context.Context, cfg aws.Config) (images []inUseImageECS
 			if err != nil {
 				return nil, err
 			}
-			containerDefs := output.TaskDefinition.ContainerDefinitions
-
-			for _, containerDef := range containerDefs {
+			for _, containerDef := range output.TaskDefinition.ContainerDefinitions {
 				images = append(images, inUseImageECS{
 					ImageName: *containerDef.Name,
 					Image:     *containerDef.Image,
@@ -275,7 +272,7 @@ func getInUseImagesLambda(ctx context.Context, cfg aws.Config) (inUseImages []in
 				Container:    *gfo.Code.ImageUri,
 			})
 		}
-
 	}
+
 	return
 }
