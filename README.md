@@ -8,3 +8,9 @@ A script that cleans out unused CDK Docker / ECR assets.
 * Does a diff between the in-use and not in-use containers.
 * Prints out a list of all of the unused containers.
 * Optionally deletes all the unused containers.
+
+## WARNING!
+
+This tool can be configured to delete things.
+
+It's not my fault if you break things etc. etc.
