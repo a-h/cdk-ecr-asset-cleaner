@@ -63,7 +63,7 @@ func run(ctx context.Context, dryRun bool) (err error) {
 	inUseImagesByContainerMap := map[string]struct{}{}
 	fmt.Printf("Images in use (ECS):\n")
 	for _, img := range inUseImagesECS {
-		fmt.Printf("  %v %v\n", img.Image, img.ImageName)
+		fmt.Printf("  %v %v\n", img.ImageName, img.Image)
 		inUseImagesByContainerMap[img.Image] = struct{}{}
 	}
 	fmt.Printf("Images in use (Lambda):\n")
@@ -212,24 +212,30 @@ type inUseImageECS struct {
 func getInUseImages(ctx context.Context, cfg aws.Config) (images []inUseImageECS, err error) {
 	ecsService := ecs.NewFromConfig(cfg)
 
-	taskDefs, err := ecsService.ListTaskDefinitions(ctx, &ecs.ListTaskDefinitionsInput{})
-	if err != nil {
-		return
-	}
+	p := ecs.NewListTaskDefinitionsPaginator(ecsService, &ecs.ListTaskDefinitionsInput{})
 
-	taskDefArns := taskDefs.TaskDefinitionArns
-	for _, arn := range taskDefArns {
-		output, err := ecsService.DescribeTaskDefinition(ctx, &ecs.DescribeTaskDefinitionInput{TaskDefinition: &arn})
+	for p.HasMorePages() {
+		var op *ecs.ListTaskDefinitionsOutput
+		op, err = p.NextPage(ctx)
+
 		if err != nil {
-			return nil, err
+			err = fmt.Errorf("failed to list task definitions: %w", err)
+			return
 		}
-		containerDefs := output.TaskDefinition.ContainerDefinitions
 
-		for _, containerDef := range containerDefs {
-			images = append(images, inUseImageECS{
-				ImageName: *containerDef.Name,
-				Image:     *containerDef.Image,
-			})
+		for _, arn := range op.TaskDefinitionArns {
+			output, err := ecsService.DescribeTaskDefinition(ctx, &ecs.DescribeTaskDefinitionInput{TaskDefinition: &arn})
+			if err != nil {
+				return nil, err
+			}
+			containerDefs := output.TaskDefinition.ContainerDefinitions
+
+			for _, containerDef := range containerDefs {
+				images = append(images, inUseImageECS{
+					ImageName: *containerDef.Name,
+					Image:     *containerDef.Image,
+				})
+			}
 		}
 	}
 
@@ -245,7 +251,7 @@ func getInUseImagesLambda(ctx context.Context, cfg aws.Config) (inUseImages []in
 	lambdaService := lambda.NewFromConfig(cfg)
 
 	p := lambda.NewListFunctionsPaginator(lambdaService, &lambda.ListFunctionsInput{})
-	if p.HasMorePages() {
+	for p.HasMorePages() {
 		var op *lambda.ListFunctionsOutput
 		op, err = p.NextPage(ctx)
 		if err != nil {
@@ -269,6 +275,7 @@ func getInUseImagesLambda(ctx context.Context, cfg aws.Config) (inUseImages []in
 				Container:    *gfo.Code.ImageUri,
 			})
 		}
+
 	}
 	return
 }
